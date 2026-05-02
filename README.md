@@ -64,6 +64,14 @@ dist\ShareNotepad
 
 Share the whole `dist\ShareNotepad` folder as a zip. On first run, the app installs itself into the current user's LocalAppData programs folder and creates a Start Menu shortcut.
 
+## Download
+
+For quick testing, download the packaged app:
+
+```text
+https://github.com/eklim23/ShareNotePad/raw/main/download.zip
+```
+
 ## Notes
 
 - Current MVP targets same Wi-Fi / same LAN usage.
