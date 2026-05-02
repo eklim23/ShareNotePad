@@ -43,9 +43,11 @@ let relaySyncReceived = [];
 let relaySnapshotRevision = 0;
 let relaySnapshotChunks = [];
 let relaySnapshotReceived = [];
+let editorComposing = false;
+let pendingRelayDocument = null;
 
 const continuedBlockTypes = new Set(["bullet", "ordered", "todo", "quote", "code"]);
-const relayUrl = "wss://cuha.cju.ac.kr/sharenotepad/ws";
+const relayUrl = "ws://127.0.0.1:8080/ws";
 const relayChunkSize = 10000;
 const relayFastSyncDelayMs = 80;
 
@@ -517,10 +519,20 @@ function applyRelayOperation(text, operation) {
   return null;
 }
 
-function applyRelayDocument(text, status) {
+function applyRelayDocument(text, status, options = {}) {
+  if (editorComposing) {
+    pendingRelayDocument = { text, status, options };
+    setRelayConnectionStatus("상대 입력 반영 대기");
+    return;
+  }
+
+  const hadEditorFocus = selectionInsideEditor();
+  const caretOffset = hadEditorFocus
+    ? transformedCaretOffset(documentCaretOffset(), options.operation)
+    : null;
   relayApplying = true;
   activeTab().content = text;
-  loadActiveTabIntoEditor();
+  loadActiveTabIntoEditor({ focus: hadEditorFocus, caretOffset });
   relayApplying = false;
   setDirty(false);
   postNative("editorChanged", { text });
@@ -557,7 +569,7 @@ function applyRelayPeerOperation(operation, fromPeer) {
 
   nextText = applied;
   relayLastText = nextText;
-  applyRelayDocument(nextText, "릴레이 동기화됨");
+  applyRelayDocument(nextText, "릴레이 동기화됨", { operation });
   sendRelayApply(operation, operation.client ?? fromPeer ?? "B");
 }
 
@@ -589,7 +601,7 @@ function applyRelayApply(payload) {
 
   relayRevision = revision;
   relayLastText = nextText;
-  applyRelayDocument(nextText, "릴레이 동기화됨");
+  applyRelayDocument(nextText, "릴레이 동기화됨", { operation });
 }
 
 function flushRelayLocalChange() {
@@ -636,7 +648,7 @@ function flushRelayLocalChange() {
 }
 
 function scheduleRelaySync() {
-  if (relayApplying || relayRole === "offline") {
+  if (relayApplying || editorComposing || relayRole === "offline") {
     return;
   }
 
@@ -818,6 +830,81 @@ function serializeBlock(block) {
   return text;
 }
 
+function serializedBlockPrefixLength(block) {
+  const type = block.dataset.type ?? "p";
+  if (type === "h1") {
+    return 2;
+  }
+  if (type === "h2") {
+    return 3;
+  }
+  if (type === "h3") {
+    return 4;
+  }
+  if (type === "bullet" || type === "quote") {
+    return 2;
+  }
+  if (type === "ordered") {
+    return 3;
+  }
+  if (type === "todo") {
+    return 6;
+  }
+  return 0;
+}
+
+function serializedBlockSpans() {
+  const spans = [];
+  let offset = 0;
+  let firstLine = true;
+  let inCode = false;
+
+  function appendLine(line) {
+    if (!firstLine) {
+      offset += 1;
+    }
+    firstLine = false;
+    const start = offset;
+    offset += line.length;
+    return start;
+  }
+
+  for (const block of collectEditorBlocks()) {
+    const type = block.dataset.type ?? "p";
+    if (type === "code") {
+      if (!inCode) {
+        appendLine("```");
+        inCode = true;
+      }
+      const text = blockText(block);
+      const start = appendLine(text);
+      spans.push({
+        block,
+        contentStart: start,
+        contentEnd: start + text.length,
+      });
+      continue;
+    }
+
+    if (inCode) {
+      appendLine("```");
+      inCode = false;
+    }
+
+    const line = serializeBlock(block);
+    const start = appendLine(line);
+    const prefix = serializedBlockPrefixLength(block);
+    const textLength = block.dataset.type === "divider" ? 0 : blockText(block).length;
+    spans.push({
+      block,
+      contentStart: start + prefix,
+      contentEnd: start + prefix + textLength,
+    });
+  }
+
+  return spans;
+}
+
 function serializeEditor() {
   const lines = [];
   let inCode = false;
@@ -858,7 +945,72 @@ function syncActiveTabFromEditor() {
   activeTab().content = serializeEditor();
 }
 
-function loadActiveTabIntoEditor() {
+function documentCaretOffset() {
+  if (!selectionInsideEditor()) {
+    return null;
+  }
+
+  const block = getCurrentBlock();
+  if (!block || block.dataset.type === "divider") {
+    return null;
+  }
+
+  const span = serializedBlockSpans().find((candidate) => candidate.block === block);
+  if (!span) {
+    return null;
+  }
+
+  return span.contentStart + caretOffsetInBlock(block);
+}
+
+function transformedCaretOffset(offset, operation) {
+  if (offset === null || operation == null) {
+    return offset;
+  }
+
+  const position = Number(operation.pos ?? 0);
+  if (operation.type === "INSERT") {
+    return position <= offset ? offset + String(operation.text ?? "").length : offset;
+  }
+
+  if (operation.type === "DELETE") {
+    const length = Number(operation.len ?? 0);
+    if (position >= offset) {
+      return offset;
+    }
+    return Math.max(position, offset - Math.min(length, offset - position));
+  }
+
+  return offset;
+}
+
+function restoreDocumentCaret(offset) {
+  if (offset === null) {
+    return false;
+  }
+
+  const spans = serializedBlockSpans();
+  if (spans.length === 0) {
+    return false;
+  }
+
+  const clampedOffset = Math.max(0, Math.min(offset, serializeEditor().length));
+  let fallback = spans[spans.length - 1];
+  for (const span of spans) {
+    if (clampedOffset <= span.contentEnd) {
+      fallback = span;
+      break;
+    }
+  }
+
+  const blockOffset = Math.max(0, Math.min(clampedOffset - fallback.contentStart, blockText(fallback.block).length));
+  editor.focus();
+  setCaretInBlock(fallback.block, blockOffset);
+  return true;
+}
+
+function loadActiveTabIntoEditor(options = {}) {
+  const { focus = true, caretOffset = null } = options;
   setEditorFromMarkdown(activeTab().content);
   documentStatus.textContent = activeTab().title;
   updateCounts();
@@ -866,10 +1018,15 @@ function loadActiveTabIntoEditor() {
   if (!previewPane.hidden) {
     renderMarkdown(serializeEditor());
   }
-  editor.focus();
-  const firstBlock = editor.querySelector(".editor-block");
-  if (firstBlock) {
-    setCaretInBlock(firstBlock, blockText(firstBlock).length);
+  if (caretOffset !== null && restoreDocumentCaret(caretOffset)) {
+    return;
+  }
+  if (focus) {
+    editor.focus();
+    const firstBlock = editor.querySelector(".editor-block");
+    if (firstBlock) {
+      setCaretInBlock(firstBlock, blockText(firstBlock).length);
+    }
   }
 }
 
@@ -1596,6 +1753,20 @@ editor.addEventListener("input", () => {
   updateSlashMenu();
   if (!previewPane.hidden) {
     renderMarkdown(serializeEditor());
+  }
+});
+
+editor.addEventListener("compositionstart", () => {
+  editorComposing = true;
+});
+
+editor.addEventListener("compositionend", () => {
+  editorComposing = false;
+  scheduleRelaySync();
+  if (pendingRelayDocument) {
+    const pending = pendingRelayDocument;
+    pendingRelayDocument = null;
+    setTimeout(() => applyRelayDocument(pending.text, pending.status, pending.options), 0);
   }
 });
 

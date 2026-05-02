@@ -241,7 +241,7 @@
 - [x] 릴레이 서버 배포 문서 작성
 - [x] 릴레이 서버 systemd/nginx/caddy 배포 템플릿 작성
 - [x] 릴레이 서버 SSH 배포 스크립트 작성
-- [x] 동아리 서버 `https://cuha.cju.ac.kr/sharenotepad/healthz` 배포 확인
+- [x] 릴레이 서버 health check 배포 확인
 - [x] WebView 클라이언트 WSS 릴레이 연결 구현
 - [x] 릴레이 방 만들기/방 들어가기 UI 연결
 - [x] 릴레이 초대 코드로 외부망 접속 확인
