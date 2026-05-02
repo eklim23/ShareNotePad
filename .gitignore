@@ -41,6 +41,8 @@ ipch/
 *.exe
 *.dll
 *.res
+/relay-server/relay-server
+/relay-server/relay-server.exe
 
 # Runtime/cache files
 *.log
@@ -63,6 +65,11 @@ ShareNotepad.exe.WebView2/
 /third_party/Microsoft.Web.WebView2/
 /third_party/*.nupkg
 /third_party/*.zip
+
+# Relay server local output
+/relay-server/sharenotepad-relay
+/relay-server/sharenotepad-relay.exe
+/relay-server/*.log
 
 # OS/editor noise
 Thumbs.db

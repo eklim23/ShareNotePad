@@ -31,6 +31,7 @@ MVP는 로그인 없는 2인 내부망 실시간 공유 메모장을 목표로 �
 | [13-required-skills.md](13-required-skills.md) | ShareNotepad 개발에 필요한 기술 역량과 학습 순서 |
 | [14-ui-polish-guide.md](14-ui-polish-guide.md) | Windows 11 메모장형 UI 다듬기 기준 |
 | [15-webview2-transition.md](15-webview2-transition.md) | WebView2 UI 전환 구조와 브릿지 기준 |
+| [16-relay-server.md](16-relay-server.md) | 학교망 대응용 외부 릴레이 서버 설계 |
 
 ## 개발 시작 순서
 

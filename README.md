@@ -64,12 +64,45 @@ dist\ShareNotepad
 
 Share the whole `dist\ShareNotepad` folder as a zip. On first run, the app installs itself into the current user's LocalAppData programs folder and creates a Start Menu shortcut.
 
+## Relay Server
+
+For school/company networks that block peer-to-peer traffic, ShareNotepad includes a lightweight relay server prototype:
+
+```powershell
+cd relay-server
+go run .
+```
+
+The relay exposes:
+
+```text
+GET /healthz
+GET /ws
+```
+
+See [relay-server/README.md](relay-server/README.md) for deployment details.
+
 ## Download
 
 For quick testing, download the packaged app:
 
 ```text
 https://github.com/eklim23/ShareNotePad/raw/main/download.zip
+```
+
+## Relay Server
+
+For school networks that block device-to-device connections, use the relay server:
+
+```powershell
+cd relay-server
+go run .
+```
+
+Default endpoint:
+
+```text
+ws://server:8080/ws
 ```
 
 ## Notes
