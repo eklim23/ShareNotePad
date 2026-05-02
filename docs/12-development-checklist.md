@@ -357,7 +357,7 @@
 
 ## 15. 보안 제한
 
-- [ ] 초대 코드 안전 난수 생성
+- [x] 초대 코드 안전 난수 생성
 - [ ] 초대 코드 10분 만료
 - [x] 세션당 최대 2명 제한
 - [x] 잘못된 JOIN 5회 후 차단
@@ -367,6 +367,12 @@
 - [x] 잘못된 client 무시
 - [x] 잘못된 session 거절
 - [x] 로그에 reconnect_token 원문 기록 금지
+- [x] Relay 서버 기본 localhost 바인딩
+- [x] Relay 서버 연결 수/방 수 제한
+- [x] Relay 서버 IP 기반 rate limit
+- [x] Relay 서버 idle timeout
+- [x] Relay 서버 선택적 Origin allowlist
+- [x] Relay 서버 방 코드 로그 비노출
 
 완료 기준:
 

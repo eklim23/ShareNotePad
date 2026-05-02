@@ -13,23 +13,29 @@ go run .
 Default address:
 
 ```text
-:8080
+127.0.0.1:8080
 ```
 
 Environment variables:
 
 | Name | Default | Description |
 | --- | --- | --- |
-| `SHARENOTEPAD_RELAY_ADDR` | `:8080` | HTTP/WebSocket listen address |
+| `SHARENOTEPAD_RELAY_ADDR` | `127.0.0.1:8080` | HTTP/WebSocket listen address |
 | `SHARENOTEPAD_ROOM_TTL` | `30m` | Inactive room expiration |
+| `SHARENOTEPAD_IDLE_TIMEOUT` | `2m` | WebSocket idle timeout |
 | `SHARENOTEPAD_MAX_MESSAGE_BYTES` | `65536` | Maximum WebSocket message size |
+| `SHARENOTEPAD_MAX_ROOMS` | `1000` | Maximum active rooms |
+| `SHARENOTEPAD_MAX_CONNECTIONS` | `2000` | Maximum active WebSocket connections |
+| `SHARENOTEPAD_RATE_LIMIT_PER_MINUTE` | `60` | Per-IP create/join/connect action limit |
+| `SHARENOTEPAD_ROOM_CODE_LENGTH` | `8` | Room code length |
+| `SHARENOTEPAD_ALLOWED_ORIGINS` | empty | Optional comma-separated WebSocket Origin allowlist |
 
 Short aliases `ADDR`, `ROOM_TTL`, and `MAX_MESSAGE_BYTES` are also supported for quick local testing.
 
 Example:
 
 ```bash
-SHARENOTEPAD_RELAY_ADDR=:8080 SHARENOTEPAD_ROOM_TTL=30m go run .
+SHARENOTEPAD_RELAY_ADDR=127.0.0.1:8080 SHARENOTEPAD_ROOM_TTL=30m go run .
 ```
 
 Build:
@@ -128,7 +134,8 @@ The server also accepts unknown JSON message types after a peer joins a room and
 ## Notes
 
 - Maximum 2 peers per room.
-- Rooms are 6-digit codes.
+- Rooms use random non-ambiguous alphanumeric codes.
 - Rooms are deleted when empty.
 - Inactive rooms expire automatically.
 - No database is required for MVP.
+- For public deployment, expose only HTTPS/WSS through Nginx or Caddy.

@@ -18,7 +18,7 @@ Laptop A ── WSS /ws ── relay-server ── WSS /ws ── Laptop B
 
 ## 서버 역할
 
-- 6자리 방 코드 생성
+- 추측하기 어려운 alphanumeric 방 코드 생성
 - 방당 최대 2명 접속
 - `A -> B`, `B -> A` JSON payload 중계
 - 빈 방 삭제

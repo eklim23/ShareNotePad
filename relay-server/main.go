@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -21,9 +22,15 @@ import (
 )
 
 const (
-	defaultAddr            = ":8080"
+	defaultAddr            = "127.0.0.1:8080"
 	defaultRoomTTL         = 30 * time.Minute
 	defaultMaxMessageBytes = int64(64 * 1024)
+	defaultMaxRooms        = 1000
+	defaultMaxConnections  = 2000
+	defaultRateLimit       = 60
+	defaultIdleTimeout     = 2 * time.Minute
+	defaultRoomCodeLength  = 8
+	roomCodeAlphabet       = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 	websocketGUID          = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 )
 
@@ -46,9 +53,22 @@ type serverMessage struct {
 type hub struct {
 	mu               sync.Mutex
 	rooms            map[string]*room
+	rateLimits       map[string]*rateLimit
 	roomTTL          time.Duration
+	idleTimeout      time.Duration
 	maxMessageBytes  int64
+	maxRooms         int
+	maxConnections   int
+	connections      int
+	rateLimit        int
+	roomCodeLength   int
+	allowedOrigins   map[string]struct{}
 	cleanupFrequency time.Duration
+}
+
+type rateLimit struct {
+	windowStart time.Time
+	count       int
 }
 
 type room struct {
@@ -66,17 +86,31 @@ type peer struct {
 	conn   *wsConn
 	send   chan []byte
 	closed bool
+	ip     string
 }
 
 func main() {
 	addr := envString("SHARENOTEPAD_RELAY_ADDR", envString("ADDR", defaultAddr))
 	roomTTL := envDuration("SHARENOTEPAD_ROOM_TTL", envDuration("ROOM_TTL", defaultRoomTTL))
+	idleTimeout := envDuration("SHARENOTEPAD_IDLE_TIMEOUT", defaultIdleTimeout)
 	maxMessageBytes := envInt64("SHARENOTEPAD_MAX_MESSAGE_BYTES", envInt64("MAX_MESSAGE_BYTES", defaultMaxMessageBytes))
+	maxRooms := envInt("SHARENOTEPAD_MAX_ROOMS", defaultMaxRooms)
+	maxConnections := envInt("SHARENOTEPAD_MAX_CONNECTIONS", defaultMaxConnections)
+	rateLimit := envInt("SHARENOTEPAD_RATE_LIMIT_PER_MINUTE", defaultRateLimit)
+	roomCodeLength := envInt("SHARENOTEPAD_ROOM_CODE_LENGTH", defaultRoomCodeLength)
+	allowedOrigins := envSet("SHARENOTEPAD_ALLOWED_ORIGINS")
 
 	h := &hub{
 		rooms:            make(map[string]*room),
+		rateLimits:       make(map[string]*rateLimit),
 		roomTTL:          roomTTL,
+		idleTimeout:      idleTimeout,
 		maxMessageBytes:  maxMessageBytes,
+		maxRooms:         maxRooms,
+		maxConnections:   maxConnections,
+		rateLimit:        rateLimit,
+		roomCodeLength:   roomCodeLength,
+		allowedOrigins:   allowedOrigins,
 		cleanupFrequency: time.Minute,
 	}
 	go h.cleanupLoop()
@@ -98,7 +132,18 @@ func main() {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	log.Printf("ShareNotepad relay listening on %s room_ttl=%s max_message_bytes=%d", addr, roomTTL, maxMessageBytes)
+	if len(allowedOrigins) == 0 {
+		log.Printf("warning: SHARENOTEPAD_ALLOWED_ORIGINS is empty; accepting any WebSocket Origin")
+	}
+	log.Printf(
+		"ShareNotepad relay listening on %s room_ttl=%s idle_timeout=%s max_message_bytes=%d max_rooms=%d max_connections=%d",
+		addr,
+		roomTTL,
+		idleTimeout,
+		maxMessageBytes,
+		maxRooms,
+		maxConnections,
+	)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
@@ -138,17 +183,59 @@ func envInt64(name string, fallback int64) int64 {
 	return parsed
 }
 
+func envInt(name string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 {
+		log.Printf("invalid %s=%q, using %d", name, value, fallback)
+		return fallback
+	}
+	return parsed
+}
+
+func envSet(name string) map[string]struct{} {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return nil
+	}
+
+	result := make(map[string]struct{})
+	for _, item := range strings.Split(value, ",") {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			result[item] = struct{}{}
+		}
+	}
+	return result
+}
+
 func (h *hub) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := acceptWebSocket(w, r, h.maxMessageBytes)
+	ip := h.clientIP(r)
+	if !h.allowRateLimitedAction(ip) {
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+		return
+	}
+
+	if !h.registerConnection() {
+		http.Error(w, "server busy", http.StatusServiceUnavailable)
+		return
+	}
+	conn, err := acceptWebSocket(w, r, h.maxMessageBytes, h.idleTimeout, h.allowedOrigins)
 	if err != nil {
+		h.unregisterConnection()
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	defer h.unregisterConnection()
 
 	p := &peer{
 		hub:  h,
 		conn: conn,
 		send: make(chan []byte, 32),
+		ip:   ip,
 	}
 
 	go p.writeLoop()
@@ -188,6 +275,72 @@ func (p *peer) readLoop() {
 			p.hub.relayRaw(p, data)
 		}
 	}
+}
+
+func (h *hub) clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+
+	parsed := net.ParseIP(host)
+	if parsed == nil {
+		return host
+	}
+
+	if parsed.IsLoopback() {
+		forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+		if forwarded != "" {
+			first := strings.TrimSpace(strings.Split(forwarded, ",")[0])
+			if net.ParseIP(first) != nil {
+				return first
+			}
+		}
+	}
+
+	return parsed.String()
+}
+
+func (h *hub) registerConnection() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.connections >= h.maxConnections {
+		return false
+	}
+	h.connections++
+	return true
+}
+
+func (h *hub) unregisterConnection() {
+	h.mu.Lock()
+	if h.connections > 0 {
+		h.connections--
+	}
+	h.mu.Unlock()
+}
+
+func (h *hub) allowRateLimitedAction(ip string) bool {
+	if h.rateLimit <= 0 {
+		return true
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	now := time.Now()
+	limit := h.rateLimits[ip]
+	if limit == nil || now.Sub(limit.windowStart) >= time.Minute {
+		h.rateLimits[ip] = &rateLimit{windowStart: now, count: 1}
+		return true
+	}
+
+	if limit.count >= h.rateLimit {
+		return false
+	}
+
+	limit.count++
+	return true
 }
 
 func (p *peer) writeLoop() {
@@ -232,11 +385,20 @@ func (p *peer) close() {
 }
 
 func (h *hub) createRoom(p *peer) {
+	if !h.allowRateLimitedAction(p.ip) {
+		p.sendJSON(serverMessage{Type: "ERROR", Reason: "rate_limited"})
+		return
+	}
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	if p.room != nil {
 		p.sendJSON(serverMessage{Type: "ERROR", Reason: "already_joined"})
+		return
+	}
+	if len(h.rooms) >= h.maxRooms {
+		p.sendJSON(serverMessage{Type: "ERROR", Reason: "server_busy"})
 		return
 	}
 
@@ -264,11 +426,20 @@ func (h *hub) createRoom(p *peer) {
 		Peer:       p.id,
 		TTLSeconds: int64(h.roomTTL.Seconds()),
 	})
-	log.Printf("room created code=%s", code)
+	log.Printf("room created")
 }
 
 func (h *hub) joinRoom(p *peer, code string) {
-	code = strings.TrimSpace(code)
+	if !h.allowRateLimitedAction(p.ip) {
+		p.sendJSON(serverMessage{Type: "JOIN_FAIL", Room: code, Reason: "rate_limited"})
+		return
+	}
+
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if !isValidRoomCode(code) {
+		p.sendJSON(serverMessage{Type: "JOIN_FAIL", Room: code, Reason: "invalid_code"})
+		return
+	}
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -305,7 +476,7 @@ func (h *hub) joinRoom(p *peer, code string) {
 		TTLSeconds: int64(h.roomTTL.Seconds()),
 	})
 	h.notifyRoomLocked(r, p, serverMessage{Type: "PEER_JOINED", Room: code, Peer: p.id})
-	log.Printf("peer joined code=%s peer=%s", code, p.id)
+	log.Printf("peer joined peer=%s", p.id)
 }
 
 func (h *hub) relayPayload(p *peer, payload json.RawMessage) {
@@ -384,7 +555,7 @@ func (h *hub) notifyRoomLocked(r *room, except *peer, message serverMessage) {
 
 func (h *hub) generateRoomCodeLocked() (string, error) {
 	for attempt := 0; attempt < 100; attempt++ {
-		code, err := randomSixDigits()
+		code, err := randomRoomCode(h.roomCodeLength)
 		if err != nil {
 			return "", err
 		}
@@ -409,6 +580,12 @@ func (h *hub) cleanupExpiredRooms() {
 	defer h.mu.Unlock()
 
 	now := time.Now()
+	for ip, limit := range h.rateLimits {
+		if now.Sub(limit.windowStart) >= 2*time.Minute {
+			delete(h.rateLimits, ip)
+		}
+	}
+
 	for code, r := range h.rooms {
 		if now.Sub(r.updated) <= h.roomTTL {
 			continue
@@ -419,7 +596,7 @@ func (h *hub) cleanupExpiredRooms() {
 			go p.close()
 		}
 		delete(h.rooms, code)
-		log.Printf("room expired code=%s", code)
+		log.Printf("room expired")
 	}
 }
 
@@ -430,13 +607,36 @@ func nextPeerID(r *room) string {
 	return "B"
 }
 
-func randomSixDigits() (string, error) {
-	var bytes [4]byte
-	if _, err := rand.Read(bytes[:]); err != nil {
-		return "", err
+func randomRoomCode(length int) (string, error) {
+	if length < 6 {
+		length = 6
 	}
-	value := binary.BigEndian.Uint32(bytes[:]) % 1000000
-	return fmt.Sprintf("%06d", value), nil
+	if length > 32 {
+		length = 32
+	}
+
+	code := make([]byte, length)
+	alphabetSize := big.NewInt(int64(len(roomCodeAlphabet)))
+	for index := range code {
+		value, err := rand.Int(rand.Reader, alphabetSize)
+		if err != nil {
+			return "", err
+		}
+		code[index] = roomCodeAlphabet[value.Int64()]
+	}
+	return string(code), nil
+}
+
+func isValidRoomCode(code string) bool {
+	if len(code) < 6 || len(code) > 32 {
+		return false
+	}
+	for _, ch := range code {
+		if !strings.ContainsRune(roomCodeAlphabet, ch) {
+			return false
+		}
+	}
+	return true
 }
 
 type wsConn struct {
@@ -444,9 +644,16 @@ type wsConn struct {
 	reader          *bufio.Reader
 	writeMu         sync.Mutex
 	maxMessageBytes int64
+	idleTimeout     time.Duration
 }
 
-func acceptWebSocket(w http.ResponseWriter, r *http.Request, maxMessageBytes int64) (*wsConn, error) {
+func acceptWebSocket(
+	w http.ResponseWriter,
+	r *http.Request,
+	maxMessageBytes int64,
+	idleTimeout time.Duration,
+	allowedOrigins map[string]struct{},
+) (*wsConn, error) {
 	if r.Method != http.MethodGet {
 		return nil, errors.New("websocket requires GET")
 	}
@@ -457,9 +664,13 @@ func acceptWebSocket(w http.ResponseWriter, r *http.Request, maxMessageBytes int
 	if r.Header.Get("Sec-WebSocket-Version") != "13" {
 		return nil, errors.New("unsupported websocket version")
 	}
+	if !originAllowed(r.Header.Get("Origin"), allowedOrigins) {
+		return nil, errors.New("websocket origin is not allowed")
+	}
 
 	key := strings.TrimSpace(r.Header.Get("Sec-WebSocket-Key"))
-	if key == "" {
+	decodedKey, err := base64.StdEncoding.DecodeString(key)
+	if key == "" || err != nil || len(decodedKey) != 16 {
 		return nil, errors.New("missing websocket key")
 	}
 
@@ -491,7 +702,20 @@ func acceptWebSocket(w http.ResponseWriter, r *http.Request, maxMessageBytes int
 		conn:            netConn,
 		reader:          rw.Reader,
 		maxMessageBytes: maxMessageBytes,
+		idleTimeout:     idleTimeout,
 	}, nil
+}
+
+func originAllowed(origin string, allowedOrigins map[string]struct{}) bool {
+	if len(allowedOrigins) == 0 {
+		return true
+	}
+	origin = strings.TrimSpace(origin)
+	if origin == "" {
+		return false
+	}
+	_, ok := allowedOrigins[origin]
+	return ok
 }
 
 func websocketAcceptKey(key string) string {
@@ -533,6 +757,12 @@ func (c *wsConn) readText() ([]byte, error) {
 }
 
 func (c *wsConn) readFrame() (byte, []byte, error) {
+	if c.idleTimeout > 0 {
+		if err := c.conn.SetReadDeadline(time.Now().Add(c.idleTimeout)); err != nil {
+			return 0, nil, err
+		}
+	}
+
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(c.reader, header); err != nil {
 		return 0, nil, err
