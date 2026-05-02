@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ShareNotepad</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="tabs" role="tablist" aria-label="문서 탭">
+        <button class="tab active" type="button" role="tab" aria-selected="true">
+          <span class="tab-title">current.txt</span>
+          <span class="tab-dirty" aria-hidden="true"></span>
+        </button>
+        <button class="tab" type="button" role="tab" aria-selected="false">
+          <span class="tab-title">새 탭 1</span>
+        </button>
+        <button id="newTabButton" class="tab-add" type="button" title="새 탭">+</button>
+      </div>
+    </header>
+
+    <nav class="commandbar" aria-label="명령">
+      <div class="menu-group">
+        <button type="button" data-menu="file">파일</button>
+        <button type="button" data-menu="edit">편집</button>
+        <button type="button" data-menu="view">보기</button>
+      </div>
+      <div class="format-group">
+        <button type="button" data-command="heading">제목</button>
+        <button type="button" data-command="list">목록</button>
+        <button type="button" data-command="bold">굵게</button>
+        <button type="button" data-command="italic">기울임</button>
+        <button type="button" data-command="link">링크</button>
+        <button id="previewButton" type="button" data-command="preview">미리보기</button>
+      </div>
+      <div class="share-group">
+        <button id="shareButton" class="primary" type="button">공유</button>
+      </div>
+    </nav>
+
+    <div id="menuLayer" class="menu-layer" hidden></div>
+    <div id="slashMenu" class="slash-menu" hidden></div>
+
+    <main class="workspace">
+      <section class="editor-pane" aria-label="문서 편집">
+        <div
+          id="editor"
+          class="rich-editor"
+          contenteditable="true"
+          spellcheck="false"
+          role="textbox"
+          aria-label="메모장"
+          aria-multiline="true"></div>
+      </section>
+      <aside id="previewPane" class="preview-pane" aria-label="마크다운 미리보기" hidden>
+        <div id="previewContent" class="preview-content"></div>
+      </aside>
+    </main>
+
+    <footer class="statusbar">
+      <span id="documentStatus">로컬 문서</span>
+      <span id="saveStatus">자동저장 준비</span>
+      <span id="connectionStatus">오프라인</span>
+      <span id="countStatus">0자</span>
+    </footer>
+  </div>
+
+  <dialog id="shareDialog" class="share-dialog">
+    <form method="dialog">
+      <h1>공유</h1>
+      <p>같은 와이파이의 상대에게 초대 코드를 전달해 같이 편집합니다.</p>
+      <label class="field">
+        <span>초대 코드</span>
+        <input id="joinCodeInput" inputmode="numeric" autocomplete="off" placeholder="예: 482913">
+      </label>
+      <div id="inviteCodeBox" class="invite-code" hidden>
+        <span>내 초대 코드</span>
+        <strong id="inviteCodeText"></strong>
+      </div>
+      <div class="dialog-actions">
+        <button id="createRoomButton" value="create" type="button">방 만들기</button>
+        <button id="joinRoomButton" value="join" type="button">방 들어가기</button>
+        <button value="cancel">닫기</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,72 @@
+# Build output
+/build/
+/out/
+/dist/
+/Debug/
+/Release/
+/x64/
+/Win32/
+/ARM64/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+Testing/
+
+# Visual Studio generated files
+/.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.user
+*.suo
+*.opendb
+*.VC.db
+*.VC.VC.opendb
+ipch/
+
+# Compiler and linker artifacts
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.iobj
+*.ipdb
+*.lib
+*.exp
+*.exe
+*.dll
+*.res
+
+# Runtime/cache files
+*.log
+*.tmp
+*.temp
+*.cache
+*.dmp
+*.exe.WebView2/
+ShareNotepad.exe.WebView2/
+
+# Local ShareNotepad data if the app is run from the repository
+/ShareNotepad/
+/current.txt
+/backup_*.txt
+/session.log
+/config.ini
+/sharenotepad.log
+
+# Downloaded third-party packages
+/third_party/Microsoft.Web.WebView2/
+/third_party/*.nupkg
+/third_party/*.zip
+
+# OS/editor noise
+Thumbs.db
+Desktop.ini
+.DS_Store
+.idea/
+.vscode/
