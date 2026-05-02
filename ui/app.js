@@ -27,8 +27,27 @@ let slashContext = null;
 let slashMatches = [];
 let slashSelectedIndex = 0;
 let loadingEditor = false;
+let relayApplying = false;
+let relaySocket = null;
+let relayConnectionId = 0;
+let relayRole = "offline";
+let relayRoom = "";
+let relayPeerId = "";
+let relayRevision = 0;
+let relayLastText = "";
+let relayTimer = 0;
+let relayPingTimer = 0;
+let relaySyncRevision = 0;
+let relaySyncChunks = [];
+let relaySyncReceived = [];
+let relaySnapshotRevision = 0;
+let relaySnapshotChunks = [];
+let relaySnapshotReceived = [];
 
 const continuedBlockTypes = new Set(["bullet", "ordered", "todo", "quote", "code"]);
+const relayUrl = "wss://cuha.cju.ac.kr/sharenotepad/ws";
+const relayChunkSize = 10000;
+const relayFastSyncDelayMs = 80;
 
 const slashCommands = [
   {
@@ -127,6 +146,502 @@ function activeTab() {
 function setDirty(value) {
   activeTab().dirty = value;
   renderTabs();
+}
+
+function setRelayConnectionStatus(text) {
+  connectionStatus.textContent = text;
+}
+
+function relayIsOpen() {
+  return relaySocket !== null && relaySocket.readyState === WebSocket.OPEN;
+}
+
+function relaySend(message) {
+  if (!relayIsOpen()) {
+    setRelayConnectionStatus("릴레이 연결 끊김");
+    return false;
+  }
+
+  relaySocket.send(JSON.stringify(message));
+  return true;
+}
+
+function relaySendPayload(payload) {
+  return relaySend({ type: "RELAY", payload });
+}
+
+function resetRelayChunkState() {
+  relaySyncRevision = 0;
+  relaySyncChunks = [];
+  relaySyncReceived = [];
+  relaySnapshotRevision = 0;
+  relaySnapshotChunks = [];
+  relaySnapshotReceived = [];
+}
+
+function clearRelayTimers() {
+  clearTimeout(relayTimer);
+  relayTimer = 0;
+  clearInterval(relayPingTimer);
+  relayPingTimer = 0;
+}
+
+function closeRelay(status = "오프라인") {
+  relayConnectionId += 1;
+  clearRelayTimers();
+  if (relaySocket) {
+    relaySocket.onopen = null;
+    relaySocket.onmessage = null;
+    relaySocket.onerror = null;
+    relaySocket.onclose = null;
+    relaySocket.close();
+  }
+  relaySocket = null;
+  relayRole = "offline";
+  relayRoom = "";
+  relayPeerId = "";
+  relayRevision = 0;
+  resetRelayChunkState();
+  setRelayConnectionStatus(status);
+}
+
+function startRelayPing() {
+  clearInterval(relayPingTimer);
+  relayPingTimer = setInterval(() => {
+    if (relayIsOpen()) {
+      relaySend({ type: "PING" });
+    }
+  }, 30000);
+}
+
+function openRelay(mode, code = "") {
+  closeRelay("릴레이 연결 중");
+  const connectionId = ++relayConnectionId;
+  relaySocket = new WebSocket(relayUrl);
+
+  relaySocket.addEventListener("open", () => {
+    if (connectionId !== relayConnectionId) {
+      return;
+    }
+
+    if (mode === "create") {
+      relaySend({ type: "CREATE" });
+    } else {
+      relaySend({ type: "JOIN", room: code });
+    }
+    startRelayPing();
+  });
+
+  relaySocket.addEventListener("message", (event) => {
+    if (connectionId !== relayConnectionId) {
+      return;
+    }
+
+    try {
+      handleRelayMessage(JSON.parse(event.data));
+    } catch {
+      setRelayConnectionStatus("릴레이 메시지 오류");
+    }
+  });
+
+  relaySocket.addEventListener("error", () => {
+    if (connectionId === relayConnectionId) {
+      setRelayConnectionStatus("릴레이 연결 오류");
+    }
+  });
+
+  relaySocket.addEventListener("close", () => {
+    if (connectionId !== relayConnectionId) {
+      return;
+    }
+    clearRelayTimers();
+    relaySocket = null;
+    relayRole = "offline";
+    setRelayConnectionStatus("릴레이 연결 끊김");
+  });
+}
+
+function createRelayRoom() {
+  saveNow();
+  syncActiveTabFromEditor();
+  relayLastText = serializeEditor();
+  relayRevision = 0;
+  resetRelayChunkState();
+  openRelay("create");
+}
+
+function joinRelayRoom(code) {
+  syncActiveTabFromEditor();
+  relayLastText = serializeEditor();
+  relayRevision = 0;
+  resetRelayChunkState();
+  openRelay("join", code.toUpperCase());
+}
+
+function handleRelayMessage(message) {
+  if (message.type === "ROOM_CREATED") {
+    relayRole = "host";
+    relayRoom = message.room ?? "";
+    relayPeerId = message.peer ?? "A";
+    relayRevision = 0;
+    relayLastText = serializeEditor();
+    inviteCodeText.textContent = relayRoom;
+    inviteCodeBox.hidden = !relayRoom;
+    joinCodeInput.value = relayRoom;
+    setRelayConnectionStatus(`릴레이 방 생성됨: ${relayRoom}`);
+    return;
+  }
+
+  if (message.type === "JOIN_OK") {
+    relayRole = "guest";
+    relayRoom = message.room ?? "";
+    relayPeerId = message.peer ?? "B";
+    relayRevision = 0;
+    relayLastText = serializeEditor();
+    shareDialog.close();
+    setRelayConnectionStatus("릴레이 연결됨");
+    relaySendPayload({ type: "SYNC_REQUEST", base_rev: relayRevision });
+    return;
+  }
+
+  if (message.type === "JOIN_FAIL") {
+    setRelayConnectionStatus(`방 들어가기 실패: ${message.reason ?? "오류"}`);
+    return;
+  }
+
+  if (message.type === "PEER_JOINED") {
+    setRelayConnectionStatus("상대 접속됨");
+    if (relayRole === "host") {
+      sendRelayFullSync();
+    }
+    return;
+  }
+
+  if (message.type === "RELAY") {
+    handleRelayPayload(message.payload ?? {}, message.from ?? "");
+    return;
+  }
+
+  if (message.type === "ERROR") {
+    setRelayConnectionStatus(`릴레이 오류: ${message.reason ?? "unknown"}`);
+  }
+}
+
+function handleRelayPayload(payload, fromPeer) {
+  if (payload.type === "SYNC_REQUEST" && relayRole === "host") {
+    sendRelayFullSync();
+    return;
+  }
+
+  if (payload.type === "SYNC_RESPONSE") {
+    receiveRelayFullSync(payload);
+    return;
+  }
+
+  if (payload.type === "DOCUMENT_SNAPSHOT" && relayRole === "host") {
+    receiveRelaySnapshot(payload);
+    return;
+  }
+
+  if (payload.type === "APPLY") {
+    applyRelayApply(payload);
+    return;
+  }
+
+  if ((payload.type === "INSERT" || payload.type === "DELETE") && relayRole === "host") {
+    applyRelayPeerOperation(payload, fromPeer);
+  }
+}
+
+function chunkText(text) {
+  const chunks = [];
+  for (let index = 0; index < text.length; index += relayChunkSize) {
+    chunks.push(text.slice(index, index + relayChunkSize));
+  }
+  return chunks.length > 0 ? chunks : [""];
+}
+
+function sendRelayFullSync() {
+  if (!relayIsOpen()) {
+    return;
+  }
+
+  const currentText = serializeEditor();
+  if (relayRole === "host" && currentText !== relayLastText) {
+    relayRevision += 1;
+    relayLastText = currentText;
+  }
+
+  const chunks = chunkText(relayLastText);
+  chunks.forEach((text, index) => {
+    relaySendPayload({
+      type: "SYNC_RESPONSE",
+      rev: relayRevision,
+      chunk_index: index,
+      chunk_count: chunks.length,
+      text,
+    });
+  });
+}
+
+function receiveRelayFullSync(payload) {
+  const revision = Number(payload.rev ?? 0);
+  const chunkIndex = Number(payload.chunk_index ?? 0);
+  const chunkCount = Number(payload.chunk_count ?? 1);
+  if (chunkCount < 1 || chunkIndex < 0 || chunkIndex >= chunkCount) {
+    setRelayConnectionStatus("전체 동기화 오류");
+    return;
+  }
+
+  if (relaySyncRevision !== revision || relaySyncChunks.length !== chunkCount) {
+    relaySyncRevision = revision;
+    relaySyncChunks = Array(chunkCount).fill("");
+    relaySyncReceived = Array(chunkCount).fill(false);
+  }
+
+  relaySyncChunks[chunkIndex] = String(payload.text ?? "");
+  relaySyncReceived[chunkIndex] = true;
+
+  if (!relaySyncReceived.every(Boolean)) {
+    setRelayConnectionStatus("전체 동기화 중");
+    return;
+  }
+
+  const text = relaySyncChunks.join("");
+  relaySyncChunks = [];
+  relaySyncReceived = [];
+  relayLastText = text;
+  relayRevision = revision;
+  applyRelayDocument(text, "릴레이 연결됨");
+}
+
+function sendRelaySnapshot(text) {
+  if (!relayIsOpen()) {
+    return;
+  }
+
+  const chunks = chunkText(text);
+  chunks.forEach((chunk, index) => {
+    relaySendPayload({
+      type: "DOCUMENT_SNAPSHOT",
+      base_rev: relayRevision,
+      chunk_index: index,
+      chunk_count: chunks.length,
+      text: chunk,
+    });
+  });
+}
+
+function receiveRelaySnapshot(payload) {
+  const baseRevision = Number(payload.base_rev ?? 0);
+  const chunkIndex = Number(payload.chunk_index ?? 0);
+  const chunkCount = Number(payload.chunk_count ?? 1);
+  if (chunkCount < 1 || chunkIndex < 0 || chunkIndex >= chunkCount) {
+    sendRelayFullSync();
+    return;
+  }
+
+  if (relaySnapshotRevision !== baseRevision || relaySnapshotChunks.length !== chunkCount) {
+    relaySnapshotRevision = baseRevision;
+    relaySnapshotChunks = Array(chunkCount).fill("");
+    relaySnapshotReceived = Array(chunkCount).fill(false);
+  }
+
+  relaySnapshotChunks[chunkIndex] = String(payload.text ?? "");
+  relaySnapshotReceived[chunkIndex] = true;
+
+  if (!relaySnapshotReceived.every(Boolean)) {
+    return;
+  }
+
+  const text = relaySnapshotChunks.join("");
+  relaySnapshotChunks = [];
+  relaySnapshotReceived = [];
+  relayRevision += 1;
+  relayLastText = text;
+  applyRelayDocument(text, "릴레이 동기화됨");
+  sendRelayFullSync();
+}
+
+function computeRelayDiff(before, after) {
+  if (before === after) {
+    return [];
+  }
+
+  let prefix = 0;
+  const minLength = Math.min(before.length, after.length);
+  while (prefix < minLength && before[prefix] === after[prefix]) {
+    prefix += 1;
+  }
+
+  let suffix = 0;
+  while (
+    suffix < before.length - prefix &&
+    suffix < after.length - prefix &&
+    before[before.length - 1 - suffix] === after[after.length - 1 - suffix]
+  ) {
+    suffix += 1;
+  }
+
+  const deleteLength = before.length - prefix - suffix;
+  const insertText = after.slice(prefix, after.length - suffix);
+  const operations = [];
+  if (deleteLength > 0) {
+    operations.push({ type: "DELETE", pos: prefix, len: deleteLength });
+  }
+  if (insertText.length > 0) {
+    operations.push({ type: "INSERT", pos: prefix, text: insertText });
+  }
+  return operations;
+}
+
+function applyRelayOperation(text, operation) {
+  const position = Number(operation.pos ?? 0);
+  if (position < 0 || position > text.length) {
+    return null;
+  }
+
+  if (operation.type === "INSERT") {
+    const inserted = String(operation.text ?? "");
+    return `${text.slice(0, position)}${inserted}${text.slice(position)}`;
+  }
+
+  if (operation.type === "DELETE") {
+    const length = Number(operation.len ?? 0);
+    if (length < 0 || position + length > text.length) {
+      return null;
+    }
+    return `${text.slice(0, position)}${text.slice(position + length)}`;
+  }
+
+  return null;
+}
+
+function applyRelayDocument(text, status) {
+  relayApplying = true;
+  activeTab().content = text;
+  loadActiveTabIntoEditor();
+  relayApplying = false;
+  setDirty(false);
+  postNative("editorChanged", { text });
+  saveStatus.textContent = "자동저장 요청";
+  setRelayConnectionStatus(status);
+}
+
+function sendRelayApply(operation, clientId) {
+  relayRevision += 1;
+  const payload = {
+    type: "APPLY",
+    rev: relayRevision,
+    op: operation.type,
+    client: clientId,
+    pos: operation.pos,
+  };
+
+  if (operation.type === "INSERT") {
+    payload.text = operation.text ?? "";
+  } else {
+    payload.len = operation.len ?? 0;
+  }
+
+  relaySendPayload(payload);
+}
+
+function applyRelayPeerOperation(operation, fromPeer) {
+  let nextText = relayLastText;
+  const applied = applyRelayOperation(nextText, operation);
+  if (applied === null) {
+    sendRelayFullSync();
+    return;
+  }
+
+  nextText = applied;
+  relayLastText = nextText;
+  applyRelayDocument(nextText, "릴레이 동기화됨");
+  sendRelayApply(operation, operation.client ?? fromPeer ?? "B");
+}
+
+function applyRelayApply(payload) {
+  const revision = Number(payload.rev ?? 0);
+  if (revision <= relayRevision) {
+    return;
+  }
+
+  if (payload.client === relayPeerId) {
+    relayRevision = revision;
+    relayLastText = serializeEditor();
+    setRelayConnectionStatus("릴레이 동기화됨");
+    return;
+  }
+
+  const operation = {
+    type: payload.op,
+    pos: payload.pos,
+    text: payload.text,
+    len: payload.len,
+  };
+  const currentText = serializeEditor();
+  const nextText = applyRelayOperation(currentText, operation);
+  if (nextText === null) {
+    relaySendPayload({ type: "SYNC_REQUEST", base_rev: relayRevision });
+    return;
+  }
+
+  relayRevision = revision;
+  relayLastText = nextText;
+  applyRelayDocument(nextText, "릴레이 동기화됨");
+}
+
+function flushRelayLocalChange() {
+  if (relayApplying || relayRole === "offline" || !relayIsOpen()) {
+    return;
+  }
+
+  syncActiveTabFromEditor();
+  const currentText = serializeEditor();
+  const operations = computeRelayDiff(relayLastText, currentText);
+  if (operations.length === 0) {
+    return;
+  }
+
+  const hasLargeInsert = operations.some((operation) => (operation.text ?? "").length > relayChunkSize);
+  if (hasLargeInsert && relayRole === "guest") {
+    sendRelaySnapshot(currentText);
+    relayLastText = currentText;
+    setRelayConnectionStatus("릴레이 동기화 중");
+    return;
+  }
+
+  if (relayRole === "host") {
+    for (const operation of operations) {
+      sendRelayApply(operation, relayPeerId || "A");
+    }
+    relayLastText = currentText;
+    setRelayConnectionStatus("릴레이 동기화됨");
+    return;
+  }
+
+  for (const operation of operations) {
+    relaySendPayload({
+      type: operation.type,
+      base_rev: relayRevision,
+      client: relayPeerId || "B",
+      pos: operation.pos,
+      text: operation.text,
+      len: operation.len,
+    });
+  }
+  relayLastText = currentText;
+  setRelayConnectionStatus("릴레이 동기화 중");
+}
+
+function scheduleRelaySync() {
+  if (relayApplying || relayRole === "offline") {
+    return;
+  }
+
+  clearTimeout(relayTimer);
+  relayTimer = setTimeout(flushRelayLocalChange, relayFastSyncDelayMs);
 }
 
 function blockText(block) {
@@ -457,6 +972,7 @@ function scheduleAutosave() {
 
   syncActiveTabFromEditor();
   setDirty(true);
+  scheduleRelaySync();
   saveStatus.textContent = "자동저장 대기";
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
@@ -467,6 +983,7 @@ function scheduleAutosave() {
 
 function saveNow() {
   syncActiveTabFromEditor();
+  flushRelayLocalChange();
   postNative("editorChanged", { text: serializeEditor() });
   setDirty(false);
   saveStatus.textContent = "저장 요청";
@@ -1122,9 +1639,8 @@ shareButton.addEventListener("click", () => {
 });
 
 createRoomButton.addEventListener("click", () => {
-  saveNow();
-  postNative("createRoom", { text: serializeEditor() });
-  connectionStatus.textContent = "방 만들기 요청";
+  createRelayRoom();
+  connectionStatus.textContent = "릴레이 방 만들기 요청";
 });
 
 joinRoomButton.addEventListener("click", () => {
@@ -1134,9 +1650,8 @@ joinRoomButton.addEventListener("click", () => {
     joinCodeInput.focus();
     return;
   }
-  postNative("joinRoom", { code });
-  connectionStatus.textContent = "방 들어가기 요청";
-  shareDialog.close();
+  joinRelayRoom(code);
+  connectionStatus.textContent = "릴레이 방 들어가기 요청";
 });
 
 newTabButton.addEventListener("click", createTab);
@@ -1146,6 +1661,9 @@ window.chrome?.webview?.addEventListener("message", (event) => {
   if (message.type === "hydrateDocument") {
     tabs[0].content = message.payload?.text ?? "";
     tabs[0].dirty = false;
+    if (relayRole === "offline") {
+      relayLastText = tabs[0].content;
+    }
     if (activeTabIndex === 0) {
       loadActiveTabIntoEditor();
     }
@@ -1153,6 +1671,9 @@ window.chrome?.webview?.addEventListener("message", (event) => {
   if (message.type === "statusChanged") {
     saveStatus.textContent = message.payload?.saveStatus ?? saveStatus.textContent;
     connectionStatus.textContent = message.payload?.connectionStatus ?? connectionStatus.textContent;
+    if (relayRole !== "offline") {
+      setRelayConnectionStatus(relayRoom ? `릴레이 연결됨: ${relayRoom}` : "릴레이 연결됨");
+    }
     if ((message.payload?.saveStatus ?? "").includes("완료")) {
       setDirty(false);
     }
