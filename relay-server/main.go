@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/rand"
 	"crypto/sha1"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -30,6 +31,8 @@ const (
 	defaultRateLimit       = 60
 	defaultIdleTimeout     = 2 * time.Minute
 	defaultRoomCodeLength  = 8
+	maxRelayTextBytes      = 48 * 1024
+	maxRelayChunks         = 512
 	roomCodeAlphabet       = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 	websocketGUID          = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 )
@@ -63,6 +66,9 @@ type hub struct {
 	rateLimit        int
 	roomCodeLength   int
 	allowedOrigins   map[string]struct{}
+	requireOrigin    bool
+	requireTLS       bool
+	relayAccessKey   string
 	cleanupFrequency time.Duration
 }
 
@@ -99,6 +105,9 @@ func main() {
 	rateLimitPerMinute := envInt("SHARENOTEPAD_RATE_LIMIT_PER_MINUTE", defaultRateLimit)
 	roomCodeLength := envInt("SHARENOTEPAD_ROOM_CODE_LENGTH", defaultRoomCodeLength)
 	allowedOrigins := envSet("SHARENOTEPAD_ALLOWED_ORIGINS")
+	requireOrigin := envBool("SHARENOTEPAD_REQUIRE_ORIGIN", false)
+	requireTLS := envBool("SHARENOTEPAD_REQUIRE_TLS", false)
+	relayAccessKey := envString("SHARENOTEPAD_RELAY_ACCESS_KEY", "")
 
 	h := &hub{
 		rooms:            make(map[string]*room),
@@ -111,6 +120,9 @@ func main() {
 		rateLimit:        rateLimitPerMinute,
 		roomCodeLength:   roomCodeLength,
 		allowedOrigins:   allowedOrigins,
+		requireOrigin:    requireOrigin,
+		requireTLS:       requireTLS,
+		relayAccessKey:   relayAccessKey,
 		cleanupFrequency: time.Minute,
 	}
 	go h.cleanupLoop()
@@ -135,14 +147,20 @@ func main() {
 	if len(allowedOrigins) == 0 {
 		log.Printf("warning: SHARENOTEPAD_ALLOWED_ORIGINS is empty; accepting any WebSocket Origin")
 	}
+	if relayAccessKey == "" {
+		log.Printf("warning: SHARENOTEPAD_RELAY_ACCESS_KEY is empty; room code is the only join secret")
+	}
 	log.Printf(
-		"ShareNotepad relay listening on %s room_ttl=%s idle_timeout=%s max_message_bytes=%d max_rooms=%d max_connections=%d",
+		"ShareNotepad relay listening on %s room_ttl=%s idle_timeout=%s max_message_bytes=%d max_rooms=%d max_connections=%d require_tls=%t require_origin=%t access_key=%t",
 		addr,
 		roomTTL,
 		idleTimeout,
 		maxMessageBytes,
 		maxRooms,
 		maxConnections,
+		requireTLS,
+		requireOrigin,
+		relayAccessKey != "",
 	)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
@@ -196,6 +214,19 @@ func envInt(name string, fallback int) int {
 	return parsed
 }
 
+func envBool(name string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		log.Printf("invalid %s=%q, using %t", name, value, fallback)
+		return fallback
+	}
+	return parsed
+}
+
 func envSet(name string) map[string]struct{} {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
@@ -218,12 +249,24 @@ func (h *hub) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "rate limited", http.StatusTooManyRequests)
 		return
 	}
+	if h.requireTLS && !requestIsSecure(r) {
+		http.Error(w, "tls required", http.StatusForbidden)
+		return
+	}
 
 	if !h.registerConnection() {
 		http.Error(w, "server busy", http.StatusServiceUnavailable)
 		return
 	}
-	conn, err := acceptWebSocket(w, r, h.maxMessageBytes, h.idleTimeout, h.allowedOrigins)
+	conn, err := acceptWebSocket(
+		w,
+		r,
+		h.maxMessageBytes,
+		h.idleTimeout,
+		h.allowedOrigins,
+		h.requireOrigin,
+		h.relayAccessKey,
+	)
 	if err != nil {
 		h.unregisterConnection()
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -272,7 +315,7 @@ func (p *peer) readLoop() {
 		case "LEAVE":
 			return
 		default:
-			p.hub.relayRaw(p, data)
+			p.sendJSON(serverMessage{Type: "ERROR", Reason: "unknown_type"})
 		}
 	}
 }
@@ -484,6 +527,10 @@ func (h *hub) relayPayload(p *peer, payload json.RawMessage) {
 		p.sendJSON(serverMessage{Type: "ERROR", Reason: "empty_payload"})
 		return
 	}
+	if err := validateRelayPayload(payload); err != nil {
+		p.sendJSON(serverMessage{Type: "ERROR", Reason: err.Error()})
+		return
+	}
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -499,24 +546,6 @@ func (h *hub) relayPayload(p *peer, payload json.RawMessage) {
 		Room:    p.room.code,
 		From:    p.id,
 		Payload: payload,
-	})
-}
-
-func (h *hub) relayRaw(p *peer, raw json.RawMessage) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if p.room == nil {
-		p.sendJSON(serverMessage{Type: "ERROR", Reason: "not_joined"})
-		return
-	}
-
-	p.room.updated = time.Now()
-	h.notifyRoomLocked(p.room, p, serverMessage{
-		Type:    "RELAY",
-		Room:    p.room.code,
-		From:    p.id,
-		Payload: raw,
 	})
 }
 
@@ -639,6 +668,127 @@ func isValidRoomCode(code string) bool {
 	return true
 }
 
+func validateRelayPayload(payload json.RawMessage) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return errors.New("invalid_payload_json")
+	}
+	if len(fields) == 0 {
+		return errors.New("empty_payload_object")
+	}
+
+	payloadType, ok := payloadString(fields, "type")
+	if !ok {
+		return errors.New("missing_payload_type")
+	}
+	payloadType = strings.ToUpper(strings.TrimSpace(payloadType))
+
+	switch payloadType {
+	case "SYNC_REQUEST":
+		if _, ok := fields["base_rev"]; ok && !payloadNumberOK(fields, "base_rev") {
+			return errors.New("invalid_base_rev")
+		}
+	case "SYNC_RESPONSE":
+		if !payloadNumberOK(fields, "rev") ||
+			!payloadChunkFieldsOK(fields) ||
+			!payloadStringLimitOK(fields, "text", maxRelayTextBytes) {
+			return errors.New("invalid_sync_response")
+		}
+	case "DOCUMENT_SNAPSHOT":
+		if !payloadNumberOK(fields, "base_rev") ||
+			!payloadChunkFieldsOK(fields) ||
+			!payloadStringLimitOK(fields, "text", maxRelayTextBytes) {
+			return errors.New("invalid_document_snapshot")
+		}
+	case "INSERT":
+		if !payloadNumberOK(fields, "base_rev") ||
+			!payloadNumberOK(fields, "pos") ||
+			!payloadStringLimitOK(fields, "text", maxRelayTextBytes) {
+			return errors.New("invalid_insert")
+		}
+	case "DELETE":
+		if !payloadNumberOK(fields, "base_rev") ||
+			!payloadNumberOK(fields, "pos") ||
+			!payloadNumberOK(fields, "len") {
+			return errors.New("invalid_delete")
+		}
+	case "APPLY":
+		op, ok := payloadString(fields, "op")
+		if !ok {
+			return errors.New("invalid_apply")
+		}
+		op = strings.ToUpper(strings.TrimSpace(op))
+		if !payloadNumberOK(fields, "rev") || !payloadNumberOK(fields, "pos") {
+			return errors.New("invalid_apply")
+		}
+		if op == "INSERT" {
+			if !payloadStringLimitOK(fields, "text", maxRelayTextBytes) {
+				return errors.New("invalid_apply_insert")
+			}
+		} else if op == "DELETE" {
+			if !payloadNumberOK(fields, "len") {
+				return errors.New("invalid_apply_delete")
+			}
+		} else {
+			return errors.New("invalid_apply_op")
+		}
+	default:
+		return errors.New("unsupported_payload_type")
+	}
+
+	return nil
+}
+
+func payloadString(fields map[string]json.RawMessage, key string) (string, bool) {
+	raw, ok := fields[key]
+	if !ok {
+		return "", false
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", false
+	}
+	return value, true
+}
+
+func payloadStringLimitOK(fields map[string]json.RawMessage, key string, maxBytes int) bool {
+	value, ok := payloadString(fields, key)
+	return ok && len([]byte(value)) <= maxBytes
+}
+
+func payloadNumberOK(fields map[string]json.RawMessage, key string) bool {
+	raw, ok := fields[key]
+	if !ok {
+		return false
+	}
+	var value uint64
+	return json.Unmarshal(raw, &value) == nil
+}
+
+func payloadChunkFieldsOK(fields map[string]json.RawMessage) bool {
+	chunkIndex, ok := payloadUint64(fields, "chunk_index")
+	if !ok {
+		return false
+	}
+	chunkCount, ok := payloadUint64(fields, "chunk_count")
+	if !ok {
+		return false
+	}
+	return chunkCount > 0 && chunkCount <= maxRelayChunks && chunkIndex < chunkCount
+}
+
+func payloadUint64(fields map[string]json.RawMessage, key string) (uint64, bool) {
+	raw, ok := fields[key]
+	if !ok {
+		return 0, false
+	}
+	var value uint64
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return 0, false
+	}
+	return value, true
+}
+
 type wsConn struct {
 	conn            net.Conn
 	reader          *bufio.Reader
@@ -653,6 +803,8 @@ func acceptWebSocket(
 	maxMessageBytes int64,
 	idleTimeout time.Duration,
 	allowedOrigins map[string]struct{},
+	requireOrigin bool,
+	relayAccessKey string,
 ) (*wsConn, error) {
 	if r.Method != http.MethodGet {
 		return nil, errors.New("websocket requires GET")
@@ -664,8 +816,11 @@ func acceptWebSocket(
 	if r.Header.Get("Sec-WebSocket-Version") != "13" {
 		return nil, errors.New("unsupported websocket version")
 	}
-	if !originAllowed(r.Header.Get("Origin"), allowedOrigins) {
+	if !originAllowed(r.Header.Get("Origin"), allowedOrigins, requireOrigin) {
 		return nil, errors.New("websocket origin is not allowed")
+	}
+	if !relayAccessKeyAllowed(r, relayAccessKey) {
+		return nil, errors.New("relay access key is required")
 	}
 
 	key := strings.TrimSpace(r.Header.Get("Sec-WebSocket-Key"))
@@ -684,11 +839,16 @@ func acceptWebSocket(
 		return nil, err
 	}
 
+	selectedProtocol := selectedWebSocketProtocol(r.Header.Get("Sec-WebSocket-Protocol"))
 	accept := websocketAcceptKey(key)
 	response := "HTTP/1.1 101 Switching Protocols\r\n" +
 		"Upgrade: websocket\r\n" +
 		"Connection: Upgrade\r\n" +
-		"Sec-WebSocket-Accept: " + accept + "\r\n\r\n"
+		"Sec-WebSocket-Accept: " + accept + "\r\n"
+	if selectedProtocol != "" {
+		response += "Sec-WebSocket-Protocol: " + selectedProtocol + "\r\n"
+	}
+	response += "\r\n"
 	if _, err := rw.WriteString(response); err != nil {
 		_ = netConn.Close()
 		return nil, err
@@ -706,9 +866,9 @@ func acceptWebSocket(
 	}, nil
 }
 
-func originAllowed(origin string, allowedOrigins map[string]struct{}) bool {
+func originAllowed(origin string, allowedOrigins map[string]struct{}, requireOrigin bool) bool {
 	if len(allowedOrigins) == 0 {
-		return true
+		return !requireOrigin
 	}
 	origin = strings.TrimSpace(origin)
 	if origin == "" {
@@ -716,6 +876,69 @@ func originAllowed(origin string, allowedOrigins map[string]struct{}) bool {
 	}
 	_, ok := allowedOrigins[origin]
 	return ok
+}
+
+func relayAccessKeyAllowed(r *http.Request, relayAccessKey string) bool {
+	if relayAccessKey == "" {
+		return true
+	}
+
+	expected := relayAccessProtocol(relayAccessKey)
+	for _, protocol := range websocketProtocols(r.Header.Get("Sec-WebSocket-Protocol")) {
+		if constantTimeStringEqual(protocol, expected) {
+			return true
+		}
+	}
+
+	headerKey := strings.TrimSpace(r.Header.Get("X-ShareNotepad-Relay-Key"))
+	return constantTimeStringEqual(headerKey, relayAccessKey)
+}
+
+func relayAccessProtocol(relayAccessKey string) string {
+	return "sn." + base64.RawURLEncoding.EncodeToString([]byte(relayAccessKey))
+}
+
+func selectedWebSocketProtocol(headerValue string) string {
+	for _, protocol := range websocketProtocols(headerValue) {
+		if protocol == "sharenotepad" {
+			return protocol
+		}
+	}
+	return ""
+}
+
+func websocketProtocols(headerValue string) []string {
+	var protocols []string
+	for _, item := range strings.Split(headerValue, ",") {
+		item = strings.TrimSpace(item)
+		if item != "" {
+			protocols = append(protocols, item)
+		}
+	}
+	return protocols
+}
+
+func constantTimeStringEqual(left string, right string) bool {
+	if left == "" || right == "" || len(left) != len(right) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
+}
+
+func requestIsSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
+		return true
+	}
+	for _, part := range strings.Split(r.Header.Get("Forwarded"), ";") {
+		part = strings.TrimSpace(part)
+		if strings.EqualFold(part, "proto=https") {
+			return true
+		}
+	}
+	return false
 }
 
 func websocketAcceptKey(key string) string {

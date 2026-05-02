@@ -379,6 +379,12 @@
 - [x] Relay 서버 idle timeout
 - [x] Relay 서버 선택적 Origin allowlist
 - [x] Relay 서버 방 코드 로그 비노출
+- [x] Relay 서버 access key handshake 옵션
+- [x] Relay 서버 TLS 강제 옵션
+- [x] Relay 서버 Origin 강제 옵션
+- [x] Relay payload schema validation
+- [x] 알 수 없는 relay message pass-through 제거
+- [x] 클라이언트 private relay config git 제외
 
 완료 기준:
 

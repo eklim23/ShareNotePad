@@ -60,6 +60,7 @@ ShareNotepad.exe.WebView2/
 /session.log
 /config.ini
 /sharenotepad.log
+/ui/private-config.js
 
 # Downloaded third-party packages
 /third_party/Microsoft.Web.WebView2/

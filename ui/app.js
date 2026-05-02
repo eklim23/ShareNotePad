@@ -47,7 +47,9 @@ let editorComposing = false;
 let pendingRelayDocument = null;
 
 const continuedBlockTypes = new Set(["bullet", "ordered", "todo", "quote", "code"]);
-const relayUrl = "ws://127.0.0.1:8080/ws";
+const relayConfig = window.ShareNotepadRelay ?? {};
+const relayUrl = relayConfig.url ?? "ws://127.0.0.1:8080/ws";
+const relayAccessKey = relayConfig.accessKey ?? "";
 const relayChunkSize = 10000;
 const relayFastSyncDelayMs = 80;
 
@@ -216,10 +218,36 @@ function startRelayPing() {
   }, 30000);
 }
 
+function relayAccessProtocol() {
+  if (!relayAccessKey) {
+    return null;
+  }
+
+  const bytes = new TextEncoder().encode(relayAccessKey);
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  const encoded = btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+  return `sn.${encoded}`;
+}
+
+function relayProtocols() {
+  const protocols = ["sharenotepad"];
+  const accessProtocol = relayAccessProtocol();
+  if (accessProtocol) {
+    protocols.push(accessProtocol);
+  }
+  return protocols;
+}
+
 function openRelay(mode, code = "") {
   closeRelay("릴레이 연결 중");
   const connectionId = ++relayConnectionId;
-  relaySocket = new WebSocket(relayUrl);
+  relaySocket = new WebSocket(relayUrl, relayProtocols());
 
   relaySocket.addEventListener("open", () => {
     if (connectionId !== relayConnectionId) {
