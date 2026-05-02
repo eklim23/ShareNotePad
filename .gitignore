@@ -2,6 +2,9 @@
 /build/
 /out/
 /dist/
+/download.zip
+/download-*.zip
+/ShareNotepad*.zip
 /Debug/
 /Release/
 /x64/
