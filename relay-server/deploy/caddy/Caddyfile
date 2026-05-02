@@ -1,0 +1,8 @@
+# Replace relay.example.com with your real domain.
+# Caddy automatically handles HTTPS certificates.
+
+relay.example.com {
+    reverse_proxy /ws 127.0.0.1:8080
+    reverse_proxy /healthz 127.0.0.1:8080
+    reverse_proxy 127.0.0.1:8080
+}

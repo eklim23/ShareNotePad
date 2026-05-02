@@ -39,6 +39,21 @@ go build -o sharenotepad-relay .
 ./sharenotepad-relay
 ```
 
+## Install On Linux
+
+```bash
+chmod +x scripts/install-linux.sh
+./scripts/install-linux.sh
+```
+
+The script builds the server, installs it to `/opt/sharenotepad-relay`, creates `/etc/sharenotepad-relay.env`, and starts a systemd service.
+
+## Docker
+
+```bash
+docker compose up -d --build
+```
+
 ## Endpoints
 
 ```text

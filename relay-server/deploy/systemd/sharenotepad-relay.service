@@ -1,0 +1,19 @@
+[Unit]
+Description=ShareNotepad Relay Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/sharenotepad-relay.env
+ExecStart=/opt/sharenotepad-relay/sharenotepad-relay
+Restart=always
+RestartSec=2
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target

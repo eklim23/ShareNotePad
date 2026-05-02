@@ -32,6 +32,7 @@ MVP는 로그인 없는 2인 내부망 실시간 공유 메모장을 목표로 �
 | [14-ui-polish-guide.md](14-ui-polish-guide.md) | Windows 11 메모장형 UI 다듬기 기준 |
 | [15-webview2-transition.md](15-webview2-transition.md) | WebView2 UI 전환 구조와 브릿지 기준 |
 | [16-relay-server.md](16-relay-server.md) | 학교망 대응용 외부 릴레이 서버 설계 |
+| [17-relay-deployment.md](17-relay-deployment.md) | 동아리 서버 배포 절차 |
 
 ## 개발 시작 순서
 

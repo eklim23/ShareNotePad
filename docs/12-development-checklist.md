@@ -239,6 +239,8 @@
 - [x] 외부망용 rendezvous/relay 설계 문서 작성
 - [x] 외부 릴레이 서버 MVP 코드 작성
 - [x] 릴레이 서버 배포 문서 작성
+- [x] 릴레이 서버 systemd/nginx/caddy 배포 템플릿 작성
+- [x] 릴레이 서버 SSH 배포 스크립트 작성
 
 완료 기준:
 
