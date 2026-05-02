@@ -96,7 +96,7 @@ func main() {
 	maxMessageBytes := envInt64("SHARENOTEPAD_MAX_MESSAGE_BYTES", envInt64("MAX_MESSAGE_BYTES", defaultMaxMessageBytes))
 	maxRooms := envInt("SHARENOTEPAD_MAX_ROOMS", defaultMaxRooms)
 	maxConnections := envInt("SHARENOTEPAD_MAX_CONNECTIONS", defaultMaxConnections)
-	rateLimit := envInt("SHARENOTEPAD_RATE_LIMIT_PER_MINUTE", defaultRateLimit)
+	rateLimitPerMinute := envInt("SHARENOTEPAD_RATE_LIMIT_PER_MINUTE", defaultRateLimit)
 	roomCodeLength := envInt("SHARENOTEPAD_ROOM_CODE_LENGTH", defaultRoomCodeLength)
 	allowedOrigins := envSet("SHARENOTEPAD_ALLOWED_ORIGINS")
 
@@ -108,7 +108,7 @@ func main() {
 		maxMessageBytes:  maxMessageBytes,
 		maxRooms:         maxRooms,
 		maxConnections:   maxConnections,
-		rateLimit:        rateLimit,
+		rateLimit:        rateLimitPerMinute,
 		roomCodeLength:   roomCodeLength,
 		allowedOrigins:   allowedOrigins,
 		cleanupFrequency: time.Minute,

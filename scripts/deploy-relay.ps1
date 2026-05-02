@@ -4,6 +4,10 @@ param(
 
     [string]$RemoteDir = "~/sharenotepad",
 
+    [string]$SshPath = "C:\Windows\System32\OpenSSH\ssh.exe",
+
+    [string]$ScpPath = "C:\Windows\System32\OpenSSH\scp.exe",
+
     [switch]$NoInstall
 )
 
@@ -16,11 +20,19 @@ if (-not (Test-Path $relayDir)) {
     throw "relay-server directory not found: $relayDir"
 }
 
+if (-not (Test-Path $SshPath)) {
+    throw "ssh executable not found: $SshPath"
+}
+
+if (-not (Test-Path $ScpPath)) {
+    throw "scp executable not found: $ScpPath"
+}
+
 Write-Host "Creating remote directory..."
-ssh $HostName "mkdir -p $RemoteDir"
+& $SshPath $HostName "mkdir -p $RemoteDir"
 
 Write-Host "Uploading relay-server..."
-scp -r $relayDir "${HostName}:$RemoteDir/"
+& $ScpPath -r $relayDir "${HostName}:$RemoteDir/"
 
 if ($NoInstall) {
     Write-Host "Uploaded only. Skipping install."
@@ -28,6 +40,6 @@ if ($NoInstall) {
 }
 
 Write-Host "Running remote install..."
-ssh $HostName "cd $RemoteDir/relay-server && chmod +x scripts/install-linux.sh && ./scripts/install-linux.sh"
+& $SshPath $HostName "cd $RemoteDir/relay-server && chmod +x scripts/install-linux.sh && ./scripts/install-linux.sh"
 
 Write-Host "Done."
